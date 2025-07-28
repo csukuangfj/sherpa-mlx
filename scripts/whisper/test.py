@@ -77,7 +77,11 @@ def compute_features(filename: str, dim: int = 80) -> np.array:
     opts = knf.WhisperFeatureOptions()
     opts.dim = dim
     online_whisper_fbank = knf.OnlineWhisperFbank(opts)
+
+    padding = np.zeros((25 * 16000), dtype=np.float32)
+
     online_whisper_fbank.accept_waveform(16000, wave)
+    online_whisper_fbank.accept_waveform(16000, padding)
     online_whisper_fbank.input_finished()
     for i in range(online_whisper_fbank.num_frames_ready):
         f = online_whisper_fbank.get_frame(i)
