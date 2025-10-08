@@ -2,161 +2,8 @@
 import math
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
-
-
-def make_pad_mask(lengths, xs=None, length_dim=-1, maxlen=None):
-    """Make mask tensor containing indices of padded part.
-
-    Args:
-        lengths (LongTensor or List): Batch of lengths (B,).
-        xs (Tensor, optional): The reference tensor.
-            If set, masks will be the same shape as this tensor.
-        length_dim (int, optional): Dimension indicator of the above tensor.
-            See the example.
-
-    Returns:
-        Tensor: Mask tensor containing indices of padded part.
-                dtype=torch.uint8 in PyTorch 1.2-
-                dtype=torch.bool in PyTorch 1.2+ (including 1.2)
-
-    Examples:
-        With only lengths.
-
-        >>> lengths = [5, 3, 2]
-        >>> make_pad_mask(lengths)
-        masks = [[0, 0, 0, 0 ,0],
-                 [0, 0, 0, 1, 1],
-                 [0, 0, 1, 1, 1]]
-
-        With the reference tensor.
-
-        >>> xs = torch.zeros((3, 2, 4))
-        >>> make_pad_mask(lengths, xs)
-        tensor([[[0, 0, 0, 0],
-                 [0, 0, 0, 0]],
-                [[0, 0, 0, 1],
-                 [0, 0, 0, 1]],
-                [[0, 0, 1, 1],
-                 [0, 0, 1, 1]]], dtype=torch.uint8)
-        >>> xs = torch.zeros((3, 2, 6))
-        >>> make_pad_mask(lengths, xs)
-        tensor([[[0, 0, 0, 0, 0, 1],
-                 [0, 0, 0, 0, 0, 1]],
-                [[0, 0, 0, 1, 1, 1],
-                 [0, 0, 0, 1, 1, 1]],
-                [[0, 0, 1, 1, 1, 1],
-                 [0, 0, 1, 1, 1, 1]]], dtype=torch.uint8)
-
-        With the reference tensor and dimension indicator.
-
-        >>> xs = torch.zeros((3, 6, 6))
-        >>> make_pad_mask(lengths, xs, 1)
-        tensor([[[0, 0, 0, 0, 0, 0],
-                 [0, 0, 0, 0, 0, 0],
-                 [0, 0, 0, 0, 0, 0],
-                 [0, 0, 0, 0, 0, 0],
-                 [0, 0, 0, 0, 0, 0],
-                 [1, 1, 1, 1, 1, 1]],
-                [[0, 0, 0, 0, 0, 0],
-                 [0, 0, 0, 0, 0, 0],
-                 [0, 0, 0, 0, 0, 0],
-                 [1, 1, 1, 1, 1, 1],
-                 [1, 1, 1, 1, 1, 1],
-                 [1, 1, 1, 1, 1, 1]],
-                [[0, 0, 0, 0, 0, 0],
-                 [0, 0, 0, 0, 0, 0],
-                 [1, 1, 1, 1, 1, 1],
-                 [1, 1, 1, 1, 1, 1],
-                 [1, 1, 1, 1, 1, 1],
-                 [1, 1, 1, 1, 1, 1]]], dtype=torch.uint8)
-        >>> make_pad_mask(lengths, xs, 2)
-        tensor([[[0, 0, 0, 0, 0, 1],
-                 [0, 0, 0, 0, 0, 1],
-                 [0, 0, 0, 0, 0, 1],
-                 [0, 0, 0, 0, 0, 1],
-                 [0, 0, 0, 0, 0, 1],
-                 [0, 0, 0, 0, 0, 1]],
-                [[0, 0, 0, 1, 1, 1],
-                 [0, 0, 0, 1, 1, 1],
-                 [0, 0, 0, 1, 1, 1],
-                 [0, 0, 0, 1, 1, 1],
-                 [0, 0, 0, 1, 1, 1],
-                 [0, 0, 0, 1, 1, 1]],
-                [[0, 0, 1, 1, 1, 1],
-                 [0, 0, 1, 1, 1, 1],
-                 [0, 0, 1, 1, 1, 1],
-                 [0, 0, 1, 1, 1, 1],
-                 [0, 0, 1, 1, 1, 1],
-                 [0, 0, 1, 1, 1, 1]]], dtype=torch.uint8)
-
-    """
-    if length_dim == 0:
-        raise ValueError("length_dim cannot be 0: {}".format(length_dim))
-
-    if not isinstance(lengths, list):
-        lengths = lengths.tolist()
-    bs = int(len(lengths))
-    if maxlen is None:
-        if xs is None:
-            maxlen = int(max(lengths))
-        else:
-            maxlen = xs.size(length_dim)
-    else:
-        assert xs is None
-        assert maxlen >= int(max(lengths))
-
-    seq_range = torch.arange(0, maxlen, dtype=torch.int64)
-    seq_range_expand = seq_range.unsqueeze(0).expand(bs, maxlen)
-    seq_length_expand = seq_range_expand.new(lengths).unsqueeze(-1)
-    mask = seq_range_expand >= seq_length_expand
-
-    if xs is not None:
-        assert xs.size(0) == bs, (xs.size(0), bs)
-
-        if length_dim < 0:
-            length_dim = xs.dim() + length_dim
-        # ind = (:, None, ..., None, :, , None, ..., None)
-        ind = tuple(
-            slice(None) if i in (0, length_dim) else None for i in range(xs.dim())
-        )
-        mask = mask[ind].expand_as(xs).to(xs.device)
-    return mask
-
-
-class LayerNorm(torch.nn.LayerNorm):
-    """Layer normalization module.
-
-    Args:
-        nout (int): Output dim size.
-        dim (int): Dimension to be normalized.
-
-    """
-
-    def __init__(self, nout, dim=-1):
-        """Construct an LayerNorm object."""
-        super(LayerNorm, self).__init__(nout, eps=1e-12)
-        self.dim = dim
-
-    def forward(self, x):
-        """Apply layer normalization.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Normalized tensor.
-
-        """
-        if self.dim == -1:
-            return super(LayerNorm, self).forward(x)
-        return (
-            super(LayerNorm, self)
-            .forward(x.transpose(self.dim, -1))
-            .transpose(self.dim, -1)
-        )
 
 
 class EncoderLayerSANM(nn.Module):
@@ -175,8 +22,8 @@ class EncoderLayerSANM(nn.Module):
         super().__init__()
         self.self_attn = self_attn
         self.feed_forward = feed_forward
-        self.norm1 = LayerNorm(in_size)
-        self.norm2 = LayerNorm(size)
+        self.norm1 = torch.nn.LayerNorm(in_size)
+        self.norm2 = torch.nn.LayerNorm(size)
         self.dropout = nn.Dropout(dropout_rate)
         self.in_size = in_size
         self.size = size
@@ -705,7 +552,7 @@ class SANMEncoder(nn.Module):
         )
 
         if self.normalize_before:
-            self.after_norm = LayerNorm(output_size)
+            self.after_norm = torch.nn.LayerNorm(output_size)
 
         self.interctc_layer_idx = interctc_layer_idx
 
@@ -866,11 +713,11 @@ class DecoderLayerSANM(torch.nn.Module):
         self.self_attn = self_attn
         self.src_attn = src_attn
         self.feed_forward = feed_forward
-        self.norm1 = LayerNorm(size)
+        self.norm1 = torch.nn.LayerNorm(size)
         if self_attn is not None:
-            self.norm2 = LayerNorm(size)
+            self.norm2 = torch.nn.LayerNorm(size)
         if src_attn is not None:
-            self.norm3 = LayerNorm(size)
+            self.norm3 = torch.nn.LayerNorm(size)
         self.dropout = torch.nn.Dropout(dropout_rate)
         self.normalize_before = normalize_before
         self.concat_after = concat_after
@@ -1255,7 +1102,7 @@ class PositionwiseFeedForwardDecoderSANM(torch.nn.Module):
         )
         self.dropout = torch.nn.Dropout(dropout_rate)
         self.activation = activation
-        self.norm = LayerNorm(hidden_units)
+        self.norm = torch.nn.LayerNorm(hidden_units)
 
     def forward(self, x):
         """Forward function."""
@@ -1322,7 +1169,7 @@ class ParaformerSANMDecoder(torch.nn.Module):
 
         self.normalize_before = normalize_before
         if self.normalize_before:
-            self.after_norm = LayerNorm(attention_dim)
+            self.after_norm = torch.nn.LayerNorm(attention_dim)
         if use_output_layer:
             self.output_layer = torch.nn.Linear(attention_dim, vocab_size)
         else:
@@ -1644,79 +1491,6 @@ class CifPredictorV2(torch.nn.Module):
         token_num_floor = torch.floor(token_num)
 
         return hidden, alphas, token_num_floor
-
-    def gen_frame_alignments(
-        self, alphas: torch.Tensor = None, encoder_sequence_length: torch.Tensor = None
-    ):
-        batch_size, maximum_length = alphas.size()
-        int_type = torch.int32
-
-        is_training = self.training
-        if is_training:
-            token_num = torch.round(torch.sum(alphas, dim=1)).type(int_type)
-        else:
-            token_num = torch.floor(torch.sum(alphas, dim=1)).type(int_type)
-
-        max_token_num = torch.max(token_num).item()
-
-        alphas_cumsum = torch.cumsum(alphas, dim=1)
-        alphas_cumsum = torch.floor(alphas_cumsum).type(int_type)
-        alphas_cumsum = alphas_cumsum[:, None, :].repeat(1, max_token_num, 1)
-
-        index = torch.ones([batch_size, max_token_num], dtype=int_type)
-        index = torch.cumsum(index, dim=1)
-        index = index[:, :, None].repeat(1, 1, maximum_length).to(alphas_cumsum.device)
-
-        index_div = torch.floor(torch.true_divide(alphas_cumsum, index)).type(int_type)
-        index_div_bool_zeros = index_div.eq(0)
-        index_div_bool_zeros_count = torch.sum(index_div_bool_zeros, dim=-1) + 1
-        index_div_bool_zeros_count = torch.clamp(
-            index_div_bool_zeros_count, 0, encoder_sequence_length.max()
-        )
-        token_num_mask = (~make_pad_mask(token_num, maxlen=max_token_num)).to(
-            token_num.device
-        )
-        index_div_bool_zeros_count *= token_num_mask
-
-        index_div_bool_zeros_count_tile = index_div_bool_zeros_count[:, :, None].repeat(
-            1, 1, maximum_length
-        )
-        ones = torch.ones_like(index_div_bool_zeros_count_tile)
-        zeros = torch.zeros_like(index_div_bool_zeros_count_tile)
-        ones = torch.cumsum(ones, dim=2)
-        cond = index_div_bool_zeros_count_tile == ones
-        index_div_bool_zeros_count_tile = torch.where(cond, zeros, ones)
-
-        index_div_bool_zeros_count_tile_bool = index_div_bool_zeros_count_tile.type(
-            torch.bool
-        )
-        index_div_bool_zeros_count_tile = 1 - index_div_bool_zeros_count_tile_bool.type(
-            int_type
-        )
-        index_div_bool_zeros_count_tile_out = torch.sum(
-            index_div_bool_zeros_count_tile, dim=1
-        )
-        index_div_bool_zeros_count_tile_out = index_div_bool_zeros_count_tile_out.type(
-            int_type
-        )
-        predictor_mask = (
-            (
-                ~make_pad_mask(
-                    encoder_sequence_length, maxlen=encoder_sequence_length.max()
-                )
-            )
-            .type(int_type)
-            .to(encoder_sequence_length.device)
-        )
-        index_div_bool_zeros_count_tile_out = (
-            index_div_bool_zeros_count_tile_out * predictor_mask
-        )
-
-        predictor_alignments = index_div_bool_zeros_count_tile_out
-        predictor_alignments_length = predictor_alignments.sum(-1).type(
-            encoder_sequence_length.dtype
-        )
-        return predictor_alignments.detach(), predictor_alignments_length.detach()
 
 
 class Paraformer(torch.nn.Module):
