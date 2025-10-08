@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright    2025  Xiaomi Corp.        (authors: Fangjun Kuang)
 import kaldi_native_fbank as knf
 import librosa
 import numpy as np
@@ -94,7 +95,7 @@ def load_tokens():
 
 @torch.no_grad()
 def main():
-    features = compute_feat("./1.wav")
+    features = compute_feat("./16.wav")
     features = torch.from_numpy(features).unsqueeze(0)
     print("features.shape", features.shape)
     model = load_model()
