@@ -38,7 +38,12 @@ class EncoderLayerSANM(nn.Module):
         self.dropout_rate = dropout_rate
 
     def forward(
-        self, x, mask, cache=None, mask_shfit_chunk=None, mask_att_chunk_encoder=None
+        self,
+        x,
+        mask=None,
+        cache=None,
+        mask_shfit_chunk=None,
+        mask_att_chunk_encoder=None,
     ):
         """Compute encoded features.
 
@@ -176,7 +181,7 @@ class MultiHeadedAttentionSANM(nn.Module):
         right_padding = kernel_size - 1 - left_padding
         self.pad_fn = nn.ConstantPad1d((left_padding, right_padding), 0.0)
 
-    def forward_fsmn(self, inputs, mask, mask_shfit_chunk=None):
+    def forward_fsmn(self, inputs, mask=None, mask_shfit_chunk=None):
         b, t, d = inputs.size()
         if mask is not None:
             mask = torch.reshape(mask, (b, -1, 1))
@@ -223,7 +228,7 @@ class MultiHeadedAttentionSANM(nn.Module):
 
         return q_h, k_h, v_h, v
 
-    def forward_attention(self, value, scores, mask, mask_att_chunk_encoder=None):
+    def forward_attention(self, value, scores, mask=None, mask_att_chunk_encoder=None):
         """Compute attention context vector.
 
         Args:
@@ -261,7 +266,7 @@ class MultiHeadedAttentionSANM(nn.Module):
 
         return self.linear_out(x)  # (batch, time1, d_model)
 
-    def forward(self, x, mask, mask_shfit_chunk=None, mask_att_chunk_encoder=None):
+    def forward(self, x, mask=None, mask_shfit_chunk=None, mask_att_chunk_encoder=None):
         """Compute scaled dot product attention.
 
         Args:
@@ -468,7 +473,7 @@ class SANMEncoder(nn.Module):
     def forward(
         self,
         xs_pad: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    ) -> torch.Tensor:
         """Embed positions in tensor.
 
         Args:
@@ -972,7 +977,6 @@ class ParaformerSANMDecoder(torch.nn.Module):
         self,
         hs_pad: torch.Tensor,
         ys_in_pad: torch.Tensor,
-        ys_in_lens: torch.Tensor,
         chunk_mask: torch.Tensor = None,
         return_hidden: bool = False,
         return_both: bool = False,
@@ -985,7 +989,6 @@ class ParaformerSANMDecoder(torch.nn.Module):
                 input token ids, int64 (batch, maxlen_out)
                 if input_layer == "embed"
                 input tensor (batch, maxlen_out, #mels) in the other cases
-            ys_in_lens: (batch)
         Returns:
             (tuple): tuple containing:
 
@@ -1137,7 +1140,6 @@ class CifPredictorV2(torch.nn.Module):
         mask_chunk_predictor=None,
         target_label_length=None,
     ):
-
         h = hidden
         context = h.transpose(1, 2)
         queries = self.pad(context)
@@ -1263,7 +1265,7 @@ class Paraformer(torch.nn.Module):
         if torch.max(pre_token_length) < 1:
             return []
 
-        decoder_outs = self.decoder(encoder_out, pre_acoustic_embeds, pre_token_length)
+        decoder_outs = self.decoder(encoder_out, pre_acoustic_embeds)
         # decoder_outs: (N, num_tokens, vocab_size)
         return decoder_outs, pre_token_length
 
