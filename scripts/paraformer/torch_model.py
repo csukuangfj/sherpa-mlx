@@ -828,96 +828,6 @@ class PositionalEncoding(torch.nn.Module):
         return self.dropout(x)
 
 
-class BaseTransformerDecoder(nn.Module):
-    """Base class of Transformer decoder module.
-
-    Args:
-        vocab_size: output dim
-        encoder_output_size: dimension of attention
-        attention_heads: the number of heads of multi head attention
-        linear_units: the number of units of position-wise feed forward
-        num_blocks: the number of decoder blocks
-        dropout_rate: dropout rate
-        self_attention_dropout_rate: dropout rate for attention
-        input_layer: input layer type
-        use_output_layer: whether to use output layer
-        pos_enc_class: PositionalEncoding or ScaledPositionalEncoding
-        normalize_before: whether to use layer_norm before the first block
-        concat_after: whether to concat attention layer's input and output
-            if True, additional linear will be applied.
-            i.e. x -> x + linear(concat(x, att(x)))
-            if False, no additional linear will be applied.
-            i.e. x -> x + att(x)
-    """
-
-    def __init__(
-        self,
-        vocab_size: int,
-        encoder_output_size: int,
-        dropout_rate: float = 0.1,
-        positional_dropout_rate: float = 0.1,
-        input_layer: str = "embed",
-        use_output_layer: bool = True,
-        pos_enc_class=PositionalEncoding,
-        normalize_before: bool = True,
-    ):
-        super().__init__()
-        attention_dim = encoder_output_size
-
-        if input_layer == "embed":
-            self.embed = torch.nn.Sequential(
-                torch.nn.Embedding(vocab_size, attention_dim),
-                pos_enc_class(attention_dim, positional_dropout_rate),
-            )
-        elif input_layer == "linear":
-            self.embed = torch.nn.Sequential(
-                torch.nn.Linear(vocab_size, attention_dim),
-                torch.nn.LayerNorm(attention_dim),
-                torch.nn.Dropout(dropout_rate),
-                torch.nn.ReLU(),
-                pos_enc_class(attention_dim, positional_dropout_rate),
-            )
-        else:
-            raise ValueError(f"only 'embed' or 'linear' is supported: {input_layer}")
-
-        self.normalize_before = normalize_before
-        if self.normalize_before:
-            self.after_norm = LayerNorm(attention_dim)
-        if use_output_layer:
-            self.output_layer = torch.nn.Linear(attention_dim, vocab_size)
-        else:
-            self.output_layer = None
-
-        # Must set by the inheritance
-        self.decoders = None
-
-    def forward(
-        self,
-        hs_pad: torch.Tensor,
-        hlens: torch.Tensor,
-        ys_in_pad: torch.Tensor,
-        ys_in_lens: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward decoder.
-
-        Args:
-            hs_pad: encoded memory, float32  (batch, maxlen_in, feat)
-            hlens: (batch)
-            ys_in_pad:
-                input token ids, int64 (batch, maxlen_out)
-                if input_layer == "embed"
-                input tensor (batch, maxlen_out, #mels) in the other cases
-            ys_in_lens: (batch)
-        Returns:
-            (tuple): tuple containing:
-
-            x: decoded token score before softmax (batch, maxlen_out, token)
-                if use_output_layer is True,
-            olens: (batch, )
-        """
-        assert False, "don't call me!"
-
-
 class DecoderLayerSANM(torch.nn.Module):
     """Single decoder layer module.
 
@@ -1363,7 +1273,7 @@ def sequence_mask(lengths, maxlen=None, dtype=torch.float32, device=None):
     return mask.type(dtype).to(device) if device is not None else mask.type(dtype)
 
 
-class ParaformerSANMDecoder(BaseTransformerDecoder):
+class ParaformerSANMDecoder(torch.nn.Module):
     """
     Author: Speech Lab of DAMO Academy, Alibaba Group
     Paraformer: Fast and Accurate Parallel Transformer for Non-autoregressive End-to-End Speech Recognition
@@ -1398,16 +1308,7 @@ class ParaformerSANMDecoder(BaseTransformerDecoder):
         tf2torch_tensor_name_prefix_torch: str = "decoder",
         tf2torch_tensor_name_prefix_tf: str = "seq2seq/decoder",
     ):
-        super().__init__(
-            vocab_size=vocab_size,
-            encoder_output_size=encoder_output_size,
-            dropout_rate=dropout_rate,
-            positional_dropout_rate=positional_dropout_rate,
-            input_layer=input_layer,
-            use_output_layer=use_output_layer,
-            pos_enc_class=pos_enc_class,
-            normalize_before=normalize_before,
-        )
+        super().__init__()
 
         attention_dim = encoder_output_size
 
