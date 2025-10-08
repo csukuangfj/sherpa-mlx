@@ -52,17 +52,12 @@ class EncoderLayerSANM(nn.Module):
             torch.Tensor: Mask tensor (#batch, time).
 
         """
-        skip_layer = False
-        # with stochastic depth, residual connection `x + f(x)` becomes
-        # `x <- x + 1 / (1 - p) * f(x)` at training time.
-        stoch_layer_coeff = 1.0
-
         residual = x
         if self.normalize_before:
             x = self.norm1(x)
 
         if self.in_size == self.size:
-            x = residual + stoch_layer_coeff * self.dropout(
+            x = residual + self.dropout(
                 self.self_attn(
                     x,
                     mask,
@@ -71,7 +66,7 @@ class EncoderLayerSANM(nn.Module):
                 )
             )
         else:
-            x = stoch_layer_coeff * self.dropout(
+            x = self.dropout(
                 self.self_attn(
                     x,
                     mask,
@@ -86,7 +81,9 @@ class EncoderLayerSANM(nn.Module):
         residual = x
         if self.normalize_before:
             x = self.norm2(x)
-        x = residual + stoch_layer_coeff * self.dropout(self.feed_forward(x))
+
+        x = residual + self.dropout(self.feed_forward(x))
+
         if not self.normalize_before:
             x = self.norm2(x)
 
@@ -156,7 +153,8 @@ class MultiHeadedAttentionSANM(nn.Module):
 
         assert lora_list is None
 
-        assert n_feat % n_head == 0
+        assert n_feat % n_head == 0, (n_feat, n_head)
+
         # We assume d_v always equals d_k
         self.d_k = n_feat // n_head
         self.h = n_head
