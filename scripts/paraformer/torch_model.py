@@ -722,20 +722,15 @@ class SANMEncoder(nn.Module):
     def forward(
         self,
         xs_pad: torch.Tensor,
-        ilens: torch.Tensor,
-        prev_states: torch.Tensor = None,
-        ctc: "CTC" = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """Embed positions in tensor.
 
         Args:
             xs_pad: input tensor (B, L, D)
-            ilens: input length (B)
-            prev_states: Not to be used now.
         Returns:
             position embedded tensor and mask
         """
-        masks = (~make_pad_mask(ilens)[:, None, :]).to(xs_pad.device)
+        masks = None
         xs_pad = xs_pad * self.output_size() ** 0.5
 
         xs_pad = self.embed(xs_pad)
@@ -743,90 +738,13 @@ class SANMEncoder(nn.Module):
         # xs_pad = self.dropout(xs_pad)
         encoder_outs = self.encoders0(xs_pad, masks)
         xs_pad, masks = encoder_outs[0], encoder_outs[1]
-        intermediate_outs = []
-        if len(self.interctc_layer_idx) == 0:
-            encoder_outs = self.encoders(xs_pad, masks)
-            xs_pad, masks = encoder_outs[0], encoder_outs[1]
-        else:
-            for layer_idx, encoder_layer in enumerate(self.encoders):
-                encoder_outs = encoder_layer(xs_pad, masks)
-                xs_pad, masks = encoder_outs[0], encoder_outs[1]
-
-                if layer_idx + 1 in self.interctc_layer_idx:
-                    encoder_out = xs_pad
-
-                    # intermediate outputs are also normalized
-                    if self.normalize_before:
-                        encoder_out = self.after_norm(encoder_out)
-
-                    intermediate_outs.append((layer_idx + 1, encoder_out))
-
-                    if self.interctc_use_conditioning:
-                        ctc_out = ctc.softmax(encoder_out)
-                        xs_pad = xs_pad + self.conditioning_layer(ctc_out)
-
-        if self.normalize_before:
-            xs_pad = self.after_norm(xs_pad)
-
-        olens = masks.squeeze(1).sum(1)
-        if len(intermediate_outs) > 0:
-            return (xs_pad, intermediate_outs), olens, None
-        return xs_pad, olens, None
-
-    def _add_overlap_chunk(self, feats: np.ndarray, cache: dict = {}):
-        if len(cache) == 0:
-            return feats
-        overlap_feats = torch.cat((cache["feats"], feats), dim=1)
-        cache["feats"] = overlap_feats[
-            :, -(cache["chunk_size"][0] + cache["chunk_size"][2]) :, :
-        ]
-        return overlap_feats
-
-    def forward_chunk(
-        self,
-        xs_pad: torch.Tensor,
-        ilens: torch.Tensor,
-        cache: dict = None,
-        ctc: "CTC" = None,
-    ):
-        xs_pad *= self.output_size() ** 0.5
-        if self.embed is None:
-            xs_pad = xs_pad
-        else:
-            xs_pad = self.embed(xs_pad, cache)
-        if cache["tail_chunk"]:
-            pass
-        else:
-            xs_pad = self._add_overlap_chunk(xs_pad, cache)
-        encoder_outs = self.encoders0(xs_pad, None, None, None, None)
+        encoder_outs = self.encoders(xs_pad, masks)
         xs_pad, masks = encoder_outs[0], encoder_outs[1]
-        intermediate_outs = []
-        if len(self.interctc_layer_idx) == 0:
-            encoder_outs = self.encoders(xs_pad, None, None, None, None)
-            xs_pad, masks = encoder_outs[0], encoder_outs[1]
-        else:
-            for layer_idx, encoder_layer in enumerate(self.encoders):
-                encoder_outs = encoder_layer(xs_pad, None, None, None, None)
-                xs_pad, masks = encoder_outs[0], encoder_outs[1]
-                if layer_idx + 1 in self.interctc_layer_idx:
-                    encoder_out = xs_pad
-
-                    # intermediate outputs are also normalized
-                    if self.normalize_before:
-                        encoder_out = self.after_norm(encoder_out)
-
-                    intermediate_outs.append((layer_idx + 1, encoder_out))
-
-                    if self.interctc_use_conditioning:
-                        ctc_out = ctc.softmax(encoder_out)
-                        xs_pad = xs_pad + self.conditioning_layer(ctc_out)
 
         if self.normalize_before:
             xs_pad = self.after_norm(xs_pad)
 
-        if len(intermediate_outs) > 0:
-            return (xs_pad, intermediate_outs), None, None
-        return xs_pad, ilens, None
+        return xs_pad
 
 
 def _pre_hook(
@@ -1308,49 +1226,12 @@ class MultiHeadedAttentionCrossAtt(nn.Module):
         # We assume d_v always equals d_k
         self.d_k = n_feat // n_head
         self.h = n_head
-        if lora_list is not None:
-            if "q" in lora_list:
-                self.linear_q = lora.Linear(
-                    n_feat,
-                    n_feat,
-                    r=lora_rank,
-                    lora_alpha=lora_alpha,
-                    lora_dropout=lora_dropout,
-                )
-            else:
-                self.linear_q = nn.Linear(n_feat, n_feat)
-            lora_kv_list = ["k" in lora_list, "v" in lora_list]
-            if lora_kv_list == [False, False]:
-                self.linear_k_v = nn.Linear(
-                    n_feat if encoder_output_size is None else encoder_output_size,
-                    n_feat * 2,
-                )
-            else:
-                self.linear_k_v = lora.MergedLinear(
-                    n_feat if encoder_output_size is None else encoder_output_size,
-                    n_feat * 2,
-                    r=lora_rank,
-                    lora_alpha=lora_alpha,
-                    lora_dropout=lora_dropout,
-                    enable_lora=lora_kv_list,
-                )
-            if "o" in lora_list:
-                self.linear_out = lora.Linear(
-                    n_feat,
-                    n_feat,
-                    r=lora_rank,
-                    lora_alpha=lora_alpha,
-                    lora_dropout=lora_dropout,
-                )
-            else:
-                self.linear_out = nn.Linear(n_feat, n_feat)
-        else:
-            self.linear_q = nn.Linear(n_feat, n_feat)
-            self.linear_k_v = nn.Linear(
-                n_feat if encoder_output_size is None else encoder_output_size,
-                n_feat * 2,
-            )
-            self.linear_out = nn.Linear(n_feat, n_feat)
+        self.linear_q = nn.Linear(n_feat, n_feat)
+        self.linear_k_v = nn.Linear(
+            n_feat if encoder_output_size is None else encoder_output_size,
+            n_feat * 2,
+        )
+        self.linear_out = nn.Linear(n_feat, n_feat)
         self.attn = None
         self.dropout = nn.Dropout(p=dropout_rate)
 
@@ -1441,37 +1322,6 @@ class MultiHeadedAttentionCrossAtt(nn.Module):
         q_h = q_h * self.d_k ** (-0.5)
         scores = torch.matmul(q_h, k_h.transpose(-2, -1))
         return self.forward_attention(v_h, scores, memory_mask, ret_attn=ret_attn)
-
-    def forward_chunk(self, x, memory, cache=None, chunk_size=None, look_back=0):
-        """Compute scaled dot product attention.
-
-        Args:
-            query (torch.Tensor): Query tensor (#batch, time1, size).
-            key (torch.Tensor): Key tensor (#batch, time2, size).
-            value (torch.Tensor): Value tensor (#batch, time2, size).
-            mask (torch.Tensor): Mask tensor (#batch, 1, time2) or
-                (#batch, time1, time2).
-
-        Returns:
-            torch.Tensor: Output tensor (#batch, time1, d_model).
-
-        """
-        q_h, k_h, v_h = self.forward_qkv(x, memory)
-        if chunk_size is not None and look_back > 0:
-            if cache is not None:
-                k_h = torch.cat((cache["k"], k_h), dim=2)
-                v_h = torch.cat((cache["v"], v_h), dim=2)
-                cache["k"] = k_h[:, :, -(look_back * chunk_size[1]) :, :]
-                cache["v"] = v_h[:, :, -(look_back * chunk_size[1]) :, :]
-            else:
-                cache_tmp = {
-                    "k": k_h[:, :, -(look_back * chunk_size[1]) :, :],
-                    "v": v_h[:, :, -(look_back * chunk_size[1]) :, :],
-                }
-                cache = cache_tmp
-        q_h = q_h * self.d_k ** (-0.5)
-        scores = torch.matmul(q_h, k_h.transpose(-2, -1))
-        return self.forward_attention(v_h, scores, None), cache
 
 
 class PositionwiseFeedForwardDecoderSANM(torch.nn.Module):
@@ -1652,7 +1502,6 @@ class ParaformerSANMDecoder(BaseTransformerDecoder):
     def forward(
         self,
         hs_pad: torch.Tensor,
-        hlens: torch.Tensor,
         ys_in_pad: torch.Tensor,
         ys_in_lens: torch.Tensor,
         chunk_mask: torch.Tensor = None,
@@ -1663,7 +1512,6 @@ class ParaformerSANMDecoder(BaseTransformerDecoder):
 
         Args:
             hs_pad: encoded memory, float32  (batch, maxlen_in, feat)
-            hlens: (batch)
             ys_in_pad:
                 input token ids, int64 (batch, maxlen_out)
                 if input_layer == "embed"
@@ -1680,11 +1528,7 @@ class ParaformerSANMDecoder(BaseTransformerDecoder):
         tgt_mask = sequence_mask(ys_in_lens, device=tgt.device)[:, :, None]
 
         memory = hs_pad
-        memory_mask = sequence_mask(hlens, device=memory.device)[:, None, :]
-        if chunk_mask is not None:
-            memory_mask = memory_mask * chunk_mask
-            if tgt_mask.size(1) != memory_mask.size(1):
-                memory_mask = torch.cat((memory_mask, memory_mask[:, -2:-1, :]), dim=1)
+        memory_mask = None
 
         x = tgt
         x, tgt_mask, memory, memory_mask, _ = self.decoders(
@@ -1841,8 +1685,11 @@ class CifPredictorV2(torch.nn.Module):
             alphas = alphas * mask
         if mask_chunk_predictor is not None:
             alphas = alphas * mask_chunk_predictor
+
         alphas = alphas.squeeze(-1)
-        mask = mask.squeeze(-1)
+        if mask is not None:
+            mask = mask.squeeze(-1)
+
         if target_label_length is not None:
             target_length = target_label_length.squeeze(-1)
         elif target_label is not None:
@@ -1868,99 +1715,6 @@ class CifPredictorV2(torch.nn.Module):
             acoustic_embeds = acoustic_embeds[:, :token_num_int, :]
 
         return acoustic_embeds, token_num, alphas, cif_peak
-
-    def forward_chunk(self, hidden, cache=None, **kwargs):
-        is_final = kwargs.get("is_final", False)
-        batch_size, len_time, hidden_size = hidden.shape
-        h = hidden
-        context = h.transpose(1, 2)
-        queries = self.pad(context)
-        output = torch.relu(self.cif_conv1d(queries))
-        output = output.transpose(1, 2)
-        output = self.cif_output(output)
-        alphas = torch.sigmoid(output)
-        alphas = torch.nn.functional.relu(
-            alphas * self.smooth_factor - self.noise_threshold
-        )
-
-        alphas = alphas.squeeze(-1)
-
-        token_length = []
-        list_fires = []
-        list_frames = []
-        cache_alphas = []
-        cache_hiddens = []
-
-        if cache is not None and "chunk_size" in cache:
-            alphas[:, : cache["chunk_size"][0]] = 0.0
-            if not is_final:
-                alphas[:, sum(cache["chunk_size"][:2]) :] = 0.0
-        if cache is not None and "cif_alphas" in cache and "cif_hidden" in cache:
-            hidden = torch.cat((cache["cif_hidden"], hidden), dim=1)
-            alphas = torch.cat((cache["cif_alphas"], alphas), dim=1)
-        if cache is not None and is_final:
-            tail_hidden = torch.zeros(
-                (batch_size, 1, hidden_size), device=hidden.device
-            )
-            tail_alphas = torch.tensor([[self.tail_threshold]], device=alphas.device)
-            tail_alphas = torch.tile(tail_alphas, (batch_size, 1))
-            hidden = torch.cat((hidden, tail_hidden), dim=1)
-            alphas = torch.cat((alphas, tail_alphas), dim=1)
-
-        len_time = alphas.shape[1]
-        for b in range(batch_size):
-            integrate = 0.0
-            frames = torch.zeros((hidden_size), device=hidden.device)
-            list_frame = []
-            list_fire = []
-            for t in range(len_time):
-                alpha = alphas[b][t]
-                if alpha + integrate < self.threshold:
-                    integrate += alpha
-                    list_fire.append(integrate)
-                    frames += alpha * hidden[b][t]
-                else:
-                    frames += (self.threshold - integrate) * hidden[b][t]
-                    list_frame.append(frames)
-                    integrate += alpha
-                    list_fire.append(integrate)
-                    integrate -= self.threshold
-                    frames = integrate * hidden[b][t]
-
-            cache_alphas.append(integrate)
-            if integrate > 0.0:
-                cache_hiddens.append(frames / integrate)
-            else:
-                cache_hiddens.append(frames)
-
-            token_length.append(torch.tensor(len(list_frame), device=alphas.device))
-            list_fires.append(list_fire)
-            list_frames.append(list_frame)
-
-        cache["cif_alphas"] = torch.stack(cache_alphas, axis=0)
-        cache["cif_alphas"] = torch.unsqueeze(cache["cif_alphas"], axis=0)
-        cache["cif_hidden"] = torch.stack(cache_hiddens, axis=0)
-        cache["cif_hidden"] = torch.unsqueeze(cache["cif_hidden"], axis=0)
-
-        max_token_len = max(token_length)
-        if max_token_len == 0:
-            return hidden, torch.stack(token_length, 0), None, None
-        list_ls = []
-        for b in range(batch_size):
-            pad_frames = torch.zeros(
-                (max_token_len - token_length[b], hidden_size), device=alphas.device
-            )
-            if token_length[b] == 0:
-                list_ls.append(pad_frames)
-            else:
-                list_frames[b] = torch.stack(list_frames[b])
-                list_ls.append(torch.cat((list_frames[b], pad_frames), dim=0))
-
-        cache["cif_alphas"] = torch.stack(cache_alphas, axis=0)
-        cache["cif_alphas"] = torch.unsqueeze(cache["cif_alphas"], axis=0)
-        cache["cif_hidden"] = torch.stack(cache_hiddens, axis=0)
-        cache["cif_hidden"] = torch.unsqueeze(cache["cif_hidden"], axis=0)
-        return torch.stack(list_ls, 0), torch.stack(token_length, 0), None, None
 
     def tail_process_fn(self, hidden, alphas, token_num=None, mask=None):
         b, t, d = hidden.size()
@@ -2092,19 +1846,14 @@ class Paraformer(torch.nn.Module):
         )
         self.predictor = CifPredictorV2(**predictor_conf)
 
-    def forward(self, x, x_len):
+    def forward(self, x):
         """
         Args:
           x: (N, T, C)
-          x_len: (N,)
         """
-        encoder_out, encoder_out_lens, _ = self.encoder(x, x_len)
-        print(encoder_out.shape, encoder_out_lens)
+        encoder_out = self.encoder(x)
 
-        encoder_out_mask = (
-            ~make_pad_mask(encoder_out_lens, maxlen=encoder_out.size(1))[:, None, :]
-        ).to(encoder_out.device)
-        # for batch_size==1, encoder_out_mask is all True of shape (1, 1, T)
+        encoder_out_mask = None
 
         pre_acoustic_embeds, pre_token_length, alphas, pre_peak_index = self.predictor(
             encoder_out, None, encoder_out_mask, ignore_id=self.ignore_id
@@ -2119,7 +1868,7 @@ class Paraformer(torch.nn.Module):
             return []
 
         decoder_outs, _ = self.decoder(
-            encoder_out, encoder_out_lens, pre_acoustic_embeds, pre_token_length
+            encoder_out, pre_acoustic_embeds, pre_token_length
         )
         # decoder_outs: (N, num_tokens, vocab_size)
         return decoder_outs, pre_token_length

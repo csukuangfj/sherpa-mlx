@@ -96,10 +96,10 @@ def load_tokens():
 def main():
     features = compute_feat("./1.wav")
     features = torch.from_numpy(features).unsqueeze(0)
-    features_len = torch.tensor([features.shape[1]], dtype=torch.int64)
     print("features.shape", features.shape)
     model = load_model()
-    out = model(features, features_len)
+    print("computing")
+    out = model(features)
     if len(out) == 0:
         print("No speech in the audio file")
         return
