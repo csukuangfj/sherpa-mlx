@@ -7,6 +7,125 @@ import torch
 import torch.nn as nn
 
 
+def make_pad_mask(lengths, xs=None, length_dim=-1, maxlen=None):
+    """Make mask tensor containing indices of padded part.
+
+    Args:
+        lengths (LongTensor or List): Batch of lengths (B,).
+        xs (Tensor, optional): The reference tensor.
+            If set, masks will be the same shape as this tensor.
+        length_dim (int, optional): Dimension indicator of the above tensor.
+            See the example.
+
+    Returns:
+        Tensor: Mask tensor containing indices of padded part.
+                dtype=torch.uint8 in PyTorch 1.2-
+                dtype=torch.bool in PyTorch 1.2+ (including 1.2)
+
+    Examples:
+        With only lengths.
+
+        >>> lengths = [5, 3, 2]
+        >>> make_pad_mask(lengths)
+        masks = [[0, 0, 0, 0 ,0],
+                 [0, 0, 0, 1, 1],
+                 [0, 0, 1, 1, 1]]
+
+        With the reference tensor.
+
+        >>> xs = torch.zeros((3, 2, 4))
+        >>> make_pad_mask(lengths, xs)
+        tensor([[[0, 0, 0, 0],
+                 [0, 0, 0, 0]],
+                [[0, 0, 0, 1],
+                 [0, 0, 0, 1]],
+                [[0, 0, 1, 1],
+                 [0, 0, 1, 1]]], dtype=torch.uint8)
+        >>> xs = torch.zeros((3, 2, 6))
+        >>> make_pad_mask(lengths, xs)
+        tensor([[[0, 0, 0, 0, 0, 1],
+                 [0, 0, 0, 0, 0, 1]],
+                [[0, 0, 0, 1, 1, 1],
+                 [0, 0, 0, 1, 1, 1]],
+                [[0, 0, 1, 1, 1, 1],
+                 [0, 0, 1, 1, 1, 1]]], dtype=torch.uint8)
+
+        With the reference tensor and dimension indicator.
+
+        >>> xs = torch.zeros((3, 6, 6))
+        >>> make_pad_mask(lengths, xs, 1)
+        tensor([[[0, 0, 0, 0, 0, 0],
+                 [0, 0, 0, 0, 0, 0],
+                 [0, 0, 0, 0, 0, 0],
+                 [0, 0, 0, 0, 0, 0],
+                 [0, 0, 0, 0, 0, 0],
+                 [1, 1, 1, 1, 1, 1]],
+                [[0, 0, 0, 0, 0, 0],
+                 [0, 0, 0, 0, 0, 0],
+                 [0, 0, 0, 0, 0, 0],
+                 [1, 1, 1, 1, 1, 1],
+                 [1, 1, 1, 1, 1, 1],
+                 [1, 1, 1, 1, 1, 1]],
+                [[0, 0, 0, 0, 0, 0],
+                 [0, 0, 0, 0, 0, 0],
+                 [1, 1, 1, 1, 1, 1],
+                 [1, 1, 1, 1, 1, 1],
+                 [1, 1, 1, 1, 1, 1],
+                 [1, 1, 1, 1, 1, 1]]], dtype=torch.uint8)
+        >>> make_pad_mask(lengths, xs, 2)
+        tensor([[[0, 0, 0, 0, 0, 1],
+                 [0, 0, 0, 0, 0, 1],
+                 [0, 0, 0, 0, 0, 1],
+                 [0, 0, 0, 0, 0, 1],
+                 [0, 0, 0, 0, 0, 1],
+                 [0, 0, 0, 0, 0, 1]],
+                [[0, 0, 0, 1, 1, 1],
+                 [0, 0, 0, 1, 1, 1],
+                 [0, 0, 0, 1, 1, 1],
+                 [0, 0, 0, 1, 1, 1],
+                 [0, 0, 0, 1, 1, 1],
+                 [0, 0, 0, 1, 1, 1]],
+                [[0, 0, 1, 1, 1, 1],
+                 [0, 0, 1, 1, 1, 1],
+                 [0, 0, 1, 1, 1, 1],
+                 [0, 0, 1, 1, 1, 1],
+                 [0, 0, 1, 1, 1, 1],
+                 [0, 0, 1, 1, 1, 1]]], dtype=torch.uint8)
+
+    """
+    if length_dim == 0:
+        raise ValueError("length_dim cannot be 0: {}".format(length_dim))
+
+    if not isinstance(lengths, list):
+        lengths = lengths.tolist()
+    bs = int(len(lengths))
+    if maxlen is None:
+        if xs is None:
+            maxlen = int(max(lengths))
+        else:
+            maxlen = xs.size(length_dim)
+    else:
+        assert xs is None
+        assert maxlen >= int(max(lengths))
+
+    seq_range = torch.arange(0, maxlen, dtype=torch.int64)
+    seq_range_expand = seq_range.unsqueeze(0).expand(bs, maxlen)
+    seq_length_expand = seq_range_expand.new(lengths).unsqueeze(-1)
+    mask = seq_range_expand >= seq_length_expand
+
+    if xs is not None:
+        assert xs.size(0) == bs, (xs.size(0), bs)
+
+        if length_dim < 0:
+            length_dim = xs.dim() + length_dim
+        # ind = (:, None, ..., None, :, , None, ..., None)
+        ind = tuple(
+            slice(None) if i in (0, length_dim) else None for i in range(xs.dim())
+        )
+        mask = mask[ind].expand_as(xs).to(xs.device)
+    return mask
+
+
 class LayerNorm(torch.nn.LayerNorm):
     """Layer normalization module.
 
@@ -618,25 +737,8 @@ class SANMEncoder(nn.Module):
         """
         masks = (~make_pad_mask(ilens)[:, None, :]).to(xs_pad.device)
         xs_pad = xs_pad * self.output_size() ** 0.5
-        if self.embed is None:
-            xs_pad = xs_pad
-        elif (
-            isinstance(self.embed, Conv2dSubsampling)
-            or isinstance(self.embed, Conv2dSubsampling2)
-            or isinstance(self.embed, Conv2dSubsampling6)
-            or isinstance(self.embed, Conv2dSubsampling8)
-        ):
-            short_status, limit_size = check_short_utt(self.embed, xs_pad.size(1))
-            if short_status:
-                raise TooShortUttError(
-                    f"has {xs_pad.size(1)} frames and is too short for subsampling "
-                    + f"(it needs more than {limit_size} frames), return empty results",
-                    xs_pad.size(1),
-                    limit_size,
-                )
-            xs_pad, masks = self.embed(xs_pad, masks)
-        else:
-            xs_pad = self.embed(xs_pad)
+
+        xs_pad = self.embed(xs_pad)
 
         # xs_pad = self.dropout(xs_pad)
         encoder_outs = self.encoders0(xs_pad, masks)
@@ -674,7 +776,6 @@ class SANMEncoder(nn.Module):
     def _add_overlap_chunk(self, feats: np.ndarray, cache: dict = {}):
         if len(cache) == 0:
             return feats
-        cache["feats"] = to_device(cache["feats"], device=feats.device)
         overlap_feats = torch.cat((cache["feats"], feats), dim=1)
         cache["feats"] = overlap_feats[
             :, -(cache["chunk_size"][0] + cache["chunk_size"][2]) :, :
@@ -694,7 +795,7 @@ class SANMEncoder(nn.Module):
         else:
             xs_pad = self.embed(xs_pad, cache)
         if cache["tail_chunk"]:
-            xs_pad = to_device(cache["feats"], device=xs_pad.device)
+            pass
         else:
             xs_pad = self._add_overlap_chunk(xs_pad, cache)
         encoder_outs = self.encoders0(xs_pad, None, None, None, None)
@@ -1609,6 +1710,82 @@ class ParaformerSANMDecoder(BaseTransformerDecoder):
         return hidden, olens
 
 
+def cif_wo_hidden_v1(alphas, threshold, return_fire_idxs=False):
+    batch_size, len_time = alphas.size()
+    device = alphas.device
+    dtype = alphas.dtype
+
+    threshold = torch.tensor([threshold], dtype=alphas.dtype).to(alphas.device)
+
+    fires = torch.zeros(batch_size, len_time, dtype=dtype, device=device)
+
+    # prefix_sum = torch.cumsum(alphas, dim=1)
+    prefix_sum = torch.cumsum(alphas, dim=1, dtype=torch.float64).to(
+        torch.float32
+    )  # cumsum precision degradation cause wrong result in extreme
+    prefix_sum_floor = torch.floor(prefix_sum)
+    dislocation_prefix_sum = torch.roll(prefix_sum, 1, dims=1)
+    dislocation_prefix_sum_floor = torch.floor(dislocation_prefix_sum)
+
+    dislocation_prefix_sum_floor[:, 0] = 0
+    dislocation_diff = prefix_sum_floor - dislocation_prefix_sum_floor
+
+    fire_idxs = dislocation_diff > 0
+    fires[fire_idxs] = 1
+    fires = fires + prefix_sum - prefix_sum_floor
+    if return_fire_idxs:
+        return fires, fire_idxs
+    return fires
+
+
+def cif_v1(hidden, alphas, threshold):
+    fires, fire_idxs = cif_wo_hidden_v1(alphas, threshold, return_fire_idxs=True)
+
+    device = hidden.device
+    dtype = hidden.dtype
+    batch_size, len_time, hidden_size = hidden.size()
+    # frames = torch.zeros(batch_size, len_time, hidden_size, dtype=dtype, device=device)
+    # prefix_sum_hidden = torch.cumsum(alphas.unsqueeze(-1).tile((1, 1, hidden_size)) * hidden, dim=1)
+    frames = torch.zeros(batch_size, len_time, hidden_size, dtype=dtype, device=device)
+    prefix_sum_hidden = torch.cumsum(
+        alphas.unsqueeze(-1).repeat((1, 1, hidden_size)) * hidden, dim=1
+    )
+
+    frames = prefix_sum_hidden[fire_idxs]
+    shift_frames = torch.roll(frames, 1, dims=0)
+
+    batch_len = fire_idxs.sum(1)
+    batch_idxs = torch.cumsum(batch_len, dim=0)
+    shift_batch_idxs = torch.roll(batch_idxs, 1, dims=0)
+    shift_batch_idxs[0] = 0
+    shift_frames[shift_batch_idxs] = 0
+
+    remains = fires - torch.floor(fires)
+    # remain_frames = remains[fire_idxs].unsqueeze(-1).tile((1, hidden_size)) * hidden[fire_idxs]
+    remain_frames = (
+        remains[fire_idxs].unsqueeze(-1).repeat((1, hidden_size)) * hidden[fire_idxs]
+    )
+
+    shift_remain_frames = torch.roll(remain_frames, 1, dims=0)
+    shift_remain_frames[shift_batch_idxs] = 0
+
+    frames = frames - shift_frames + shift_remain_frames - remain_frames
+
+    # max_label_len = batch_len.max()
+    max_label_len = (
+        torch.round(alphas.sum(-1)).int().max()
+    )  # torch.round to calculate the max length
+
+    # frame_fires = torch.zeros(batch_size, max_label_len, hidden_size, dtype=dtype, device=device)
+    frame_fires = torch.zeros(
+        batch_size, max_label_len, hidden_size, dtype=dtype, device=device
+    )
+    indices = torch.arange(max_label_len, device=device).expand(batch_size, -1)
+    frame_fires_idxs = indices < batch_len.unsqueeze(1)
+    frame_fires[frame_fires_idxs] = frames
+    return frame_fires, fires
+
+
 class CifPredictorV2(torch.nn.Module):
     def __init__(
         self,
@@ -1648,48 +1825,47 @@ class CifPredictorV2(torch.nn.Module):
         target_label_length=None,
     ):
 
-        with autocast(False):
-            h = hidden
-            context = h.transpose(1, 2)
-            queries = self.pad(context)
-            output = torch.relu(self.cif_conv1d(queries))
-            output = output.transpose(1, 2)
+        h = hidden
+        context = h.transpose(1, 2)
+        queries = self.pad(context)
+        output = torch.relu(self.cif_conv1d(queries))
+        output = output.transpose(1, 2)
 
-            output = self.cif_output(output)
-            alphas = torch.sigmoid(output)
-            alphas = torch.nn.functional.relu(
-                alphas * self.smooth_factor - self.noise_threshold
-            )
-            if mask is not None:
-                mask = mask.transpose(-1, -2).float()
-                alphas = alphas * mask
-            if mask_chunk_predictor is not None:
-                alphas = alphas * mask_chunk_predictor
-            alphas = alphas.squeeze(-1)
-            mask = mask.squeeze(-1)
-            if target_label_length is not None:
-                target_length = target_label_length.squeeze(-1)
-            elif target_label is not None:
-                target_length = (target_label != ignore_id).float().sum(-1)
+        output = self.cif_output(output)
+        alphas = torch.sigmoid(output)
+        alphas = torch.nn.functional.relu(
+            alphas * self.smooth_factor - self.noise_threshold
+        )
+        if mask is not None:
+            mask = mask.transpose(-1, -2).float()
+            alphas = alphas * mask
+        if mask_chunk_predictor is not None:
+            alphas = alphas * mask_chunk_predictor
+        alphas = alphas.squeeze(-1)
+        mask = mask.squeeze(-1)
+        if target_label_length is not None:
+            target_length = target_label_length.squeeze(-1)
+        elif target_label is not None:
+            target_length = (target_label != ignore_id).float().sum(-1)
+        else:
+            target_length = None
+        token_num = alphas.sum(-1)
+        if target_length is not None:
+            alphas *= (target_length / token_num)[:, None].repeat(1, alphas.size(1))
+        elif self.tail_threshold > 0.0:
+            if self.tail_mask:
+                hidden, alphas, token_num = self.tail_process_fn(
+                    hidden, alphas, token_num, mask=mask
+                )
             else:
-                target_length = None
-            token_num = alphas.sum(-1)
-            if target_length is not None:
-                alphas *= (target_length / token_num)[:, None].repeat(1, alphas.size(1))
-            elif self.tail_threshold > 0.0:
-                if self.tail_mask:
-                    hidden, alphas, token_num = self.tail_process_fn(
-                        hidden, alphas, token_num, mask=mask
-                    )
-                else:
-                    hidden, alphas, token_num = self.tail_process_fn(
-                        hidden, alphas, token_num, mask=None
-                    )
+                hidden, alphas, token_num = self.tail_process_fn(
+                    hidden, alphas, token_num, mask=None
+                )
 
-            acoustic_embeds, cif_peak = cif_v1(hidden, alphas, self.threshold)
-            if target_length is None and self.tail_threshold > 0.0:
-                token_num_int = torch.max(token_num).type(torch.int32).item()
-                acoustic_embeds = acoustic_embeds[:, :token_num_int, :]
+        acoustic_embeds, cif_peak = cif_v1(hidden, alphas, self.threshold)
+        if target_length is None and self.tail_threshold > 0.0:
+            token_num_int = torch.max(token_num).type(torch.int32).item()
+            acoustic_embeds = acoustic_embeds[:, :token_num_int, :]
 
         return acoustic_embeds, token_num, alphas, cif_peak
 
@@ -1720,8 +1896,6 @@ class CifPredictorV2(torch.nn.Module):
             if not is_final:
                 alphas[:, sum(cache["chunk_size"][:2]) :] = 0.0
         if cache is not None and "cif_alphas" in cache and "cif_hidden" in cache:
-            cache["cif_hidden"] = to_device(cache["cif_hidden"], device=hidden.device)
-            cache["cif_alphas"] = to_device(cache["cif_alphas"], device=alphas.device)
             hidden = torch.cat((cache["cif_hidden"], hidden), dim=1)
             alphas = torch.cat((cache["cif_alphas"], alphas), dim=1)
         if cache is not None and is_final:
@@ -1901,11 +2075,13 @@ class Paraformer(torch.nn.Module):
         self,
         input_size: int,
         vocab_size: int,
+        ignore_id=-1,
         encoder_conf: Optional[Dict] = None,
         decoder_conf: Optional[Dict] = None,
         predictor_conf: Optional[Dict] = None,
     ):
         super().__init__()
+        self.ignore_id = ignore_id
         self.encoder = SANMEncoder(input_size=input_size, **encoder_conf)
         encoder_output_size = self.encoder.output_size()
 
@@ -1915,6 +2091,38 @@ class Paraformer(torch.nn.Module):
             **decoder_conf,
         )
         self.predictor = CifPredictorV2(**predictor_conf)
+
+    def forward(self, x, x_len):
+        """
+        Args:
+          x: (N, T, C)
+          x_len: (N,)
+        """
+        encoder_out, encoder_out_lens, _ = self.encoder(x, x_len)
+        print(encoder_out.shape, encoder_out_lens)
+
+        encoder_out_mask = (
+            ~make_pad_mask(encoder_out_lens, maxlen=encoder_out.size(1))[:, None, :]
+        ).to(encoder_out.device)
+        # for batch_size==1, encoder_out_mask is all True of shape (1, 1, T)
+
+        pre_acoustic_embeds, pre_token_length, alphas, pre_peak_index = self.predictor(
+            encoder_out, None, encoder_out_mask, ignore_id=self.ignore_id
+        )
+        # pre_acoustic_embeds: (N, num_tokens, C)
+        # pre_token_length: [num_tokens,]
+        # alphas: (N, T)
+        # pre_peak_index: (N, T)
+
+        pre_token_length = pre_token_length.round().long()
+        if torch.max(pre_token_length) < 1:
+            return []
+
+        decoder_outs, _ = self.decoder(
+            encoder_out, encoder_out_lens, pre_acoustic_embeds, pre_token_length
+        )
+        # decoder_outs: (N, num_tokens, vocab_size)
+        return decoder_outs, pre_token_length
 
 
 @torch.no_grad()
