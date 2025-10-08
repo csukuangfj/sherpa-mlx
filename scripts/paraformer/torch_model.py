@@ -284,45 +284,6 @@ class MultiHeadedAttentionSANM(nn.Module):
         att_outs = self.forward_attention(v_h, scores, mask, mask_att_chunk_encoder)
         return att_outs + fsmn_memory
 
-    def forward_chunk(self, x, cache=None, chunk_size=None, look_back=0):
-        """Compute scaled dot product attention.
-
-        Args:
-            query (torch.Tensor): Query tensor (#batch, time1, size).
-            key (torch.Tensor): Key tensor (#batch, time2, size).
-            value (torch.Tensor): Value tensor (#batch, time2, size).
-            mask (torch.Tensor): Mask tensor (#batch, 1, time2) or
-                (#batch, time1, time2).
-
-        Returns:
-            torch.Tensor: Output tensor (#batch, time1, d_model).
-
-        """
-        q_h, k_h, v_h, v = self.forward_qkv(x)
-        if chunk_size is not None and look_back > 0 or look_back == -1:
-            if cache is not None:
-                k_h_stride = k_h[:, :, : -(chunk_size[2]), :]
-                v_h_stride = v_h[:, :, : -(chunk_size[2]), :]
-                k_h = torch.cat((cache["k"], k_h), dim=2)
-                v_h = torch.cat((cache["v"], v_h), dim=2)
-
-                cache["k"] = torch.cat((cache["k"], k_h_stride), dim=2)
-                cache["v"] = torch.cat((cache["v"], v_h_stride), dim=2)
-                if look_back != -1:
-                    cache["k"] = cache["k"][:, :, -(look_back * chunk_size[1]) :, :]
-                    cache["v"] = cache["v"][:, :, -(look_back * chunk_size[1]) :, :]
-            else:
-                cache_tmp = {
-                    "k": k_h[:, :, : -(chunk_size[2]), :],
-                    "v": v_h[:, :, : -(chunk_size[2]), :],
-                }
-                cache = cache_tmp
-        fsmn_memory = self.forward_fsmn(v, None)
-        q_h = q_h * self.d_k ** (-0.5)
-        scores = torch.matmul(q_h, k_h.transpose(-2, -1))
-        att_outs = self.forward_attention(v_h, scores, None)
-        return att_outs + fsmn_memory, cache
-
 
 class SinusoidalPositionEncoder(torch.nn.Module):
     """ """
@@ -665,7 +626,6 @@ class DecoderLayerSANM(torch.nn.Module):
             self.concat_linear1 = torch.nn.Linear(size + size, size)
             self.concat_linear2 = torch.nn.Linear(size + size, size)
         self.reserve_attn = False
-        self.attn_mat = []
 
     def forward(self, tgt, tgt_mask, memory, memory_mask=None, cache=None):
         """Compute decoded features.
@@ -702,119 +662,12 @@ class DecoderLayerSANM(torch.nn.Module):
             residual = x
             if self.normalize_before:
                 x = self.norm3(x)
-            if self.reserve_attn:
-                x_src_attn, attn_mat = self.src_attn(
-                    x, memory, memory_mask, ret_attn=True
-                )
-                self.attn_mat.append(attn_mat)
-            else:
-                x_src_attn = self.src_attn(x, memory, memory_mask, ret_attn=False)
+
+            x_src_attn = self.src_attn(x, memory, memory_mask, ret_attn=False)
             x = residual + self.dropout(x_src_attn)
             # x = residual + self.dropout(self.src_attn(x, memory, memory_mask))
 
         return x, tgt_mask, memory, memory_mask, cache
-
-    def get_attn_mat(self, tgt, tgt_mask, memory, memory_mask=None, cache=None):
-        residual = tgt
-        tgt = self.norm1(tgt)
-        tgt = self.feed_forward(tgt)
-
-        x = tgt
-        if self.self_attn is not None:
-            tgt = self.norm2(tgt)
-            x, cache = self.self_attn(tgt, tgt_mask, cache=cache)
-            x = residual + x
-
-        residual = x
-        x = self.norm3(x)
-        x_src_attn, attn_mat = self.src_attn(x, memory, memory_mask, ret_attn=True)
-        return attn_mat
-
-    def forward_one_step(self, tgt, tgt_mask, memory, memory_mask=None, cache=None):
-        """Compute decoded features.
-
-        Args:
-            tgt (torch.Tensor): Input tensor (#batch, maxlen_out, size).
-            tgt_mask (torch.Tensor): Mask for input tensor (#batch, maxlen_out).
-            memory (torch.Tensor): Encoded memory, float32 (#batch, maxlen_in, size).
-            memory_mask (torch.Tensor): Encoded memory mask (#batch, maxlen_in).
-            cache (List[torch.Tensor]): List of cached tensors.
-                Each tensor shape should be (#batch, maxlen_out - 1, size).
-
-        Returns:
-            torch.Tensor: Output tensor(#batch, maxlen_out, size).
-            torch.Tensor: Mask for output tensor (#batch, maxlen_out).
-            torch.Tensor: Encoded memory (#batch, maxlen_in, size).
-            torch.Tensor: Encoded memory mask (#batch, maxlen_in).
-
-        """
-        # tgt = self.dropout(tgt)
-        residual = tgt
-        if self.normalize_before:
-            tgt = self.norm1(tgt)
-        tgt = self.feed_forward(tgt)
-
-        x = tgt
-        if self.self_attn:
-            if self.normalize_before:
-                tgt = self.norm2(tgt)
-            if self.training:
-                cache = None
-            x, cache = self.self_attn(tgt, tgt_mask, cache=cache)
-            x = residual + self.dropout(x)
-
-        if self.src_attn is not None:
-            residual = x
-            if self.normalize_before:
-                x = self.norm3(x)
-
-            x = residual + self.dropout(self.src_attn(x, memory, memory_mask))
-
-        return x, tgt_mask, memory, memory_mask, cache
-
-    def forward_chunk(
-        self, tgt, memory, fsmn_cache=None, opt_cache=None, chunk_size=None, look_back=0
-    ):
-        """Compute decoded features.
-
-        Args:
-            tgt (torch.Tensor): Input tensor (#batch, maxlen_out, size).
-            tgt_mask (torch.Tensor): Mask for input tensor (#batch, maxlen_out).
-            memory (torch.Tensor): Encoded memory, float32 (#batch, maxlen_in, size).
-            memory_mask (torch.Tensor): Encoded memory mask (#batch, maxlen_in).
-            cache (List[torch.Tensor]): List of cached tensors.
-                Each tensor shape should be (#batch, maxlen_out - 1, size).
-
-        Returns:
-            torch.Tensor: Output tensor(#batch, maxlen_out, size).
-            torch.Tensor: Mask for output tensor (#batch, maxlen_out).
-            torch.Tensor: Encoded memory (#batch, maxlen_in, size).
-            torch.Tensor: Encoded memory mask (#batch, maxlen_in).
-
-        """
-        residual = tgt
-        if self.normalize_before:
-            tgt = self.norm1(tgt)
-        tgt = self.feed_forward(tgt)
-
-        x = tgt
-        if self.self_attn:
-            if self.normalize_before:
-                tgt = self.norm2(tgt)
-            x, fsmn_cache = self.self_attn(tgt, None, fsmn_cache)
-            x = residual + self.dropout(x)
-
-        if self.src_attn is not None:
-            residual = x
-            if self.normalize_before:
-                x = self.norm3(x)
-
-            x, opt_cache = self.src_attn.forward_chunk(
-                x, memory, opt_cache, chunk_size, look_back
-            )
-            x = residual + x
-
-        return x, memory, fsmn_cache, opt_cache
 
 
 class MultiHeadedAttentionSANMDecoder(nn.Module):
@@ -1049,17 +902,6 @@ class PositionwiseFeedForwardDecoderSANM(torch.nn.Module):
         return self.w_2(self.norm(self.dropout(self.activation(self.w_1(x)))))
 
 
-def sequence_mask(lengths, maxlen=None, dtype=torch.float32, device=None):
-    if maxlen is None:
-        maxlen = lengths.max()
-    row_vector = torch.arange(0, maxlen, 1).to(lengths.device)
-    matrix = torch.unsqueeze(lengths, dim=-1)
-    mask = row_vector < matrix
-    mask = mask.detach()
-
-    return mask.type(dtype).to(device) if device is not None else mask.type(dtype)
-
-
 class ParaformerSANMDecoder(torch.nn.Module):
     """
     Author: Speech Lab of DAMO Academy, Alibaba Group
@@ -1210,10 +1052,9 @@ class ParaformerSANMDecoder(torch.nn.Module):
 
             x: decoded token score before softmax (batch, maxlen_out, token)
                 if use_output_layer is True,
-            olens: (batch, )
         """
         tgt = ys_in_pad
-        tgt_mask = sequence_mask(ys_in_lens, device=tgt.device)[:, :, None]
+        tgt_mask = None
 
         memory = hs_pad
         memory_mask = None
@@ -1232,14 +1073,15 @@ class ParaformerSANMDecoder(torch.nn.Module):
         if self.normalize_before:
             hidden = self.after_norm(x)
 
-        olens = tgt_mask.sum(1)
         if self.output_layer is not None and return_hidden is False:
             x = self.output_layer(hidden)
-            return x, olens
+            return x
+
         if return_both:
             x = self.output_layer(hidden)
-            return x, hidden, olens
-        return hidden, olens
+            return x, hidden
+
+        return hidden
 
 
 def cif_wo_hidden_v1(alphas, threshold, return_fire_idxs=False):
@@ -1482,9 +1324,7 @@ class Paraformer(torch.nn.Module):
         if torch.max(pre_token_length) < 1:
             return []
 
-        decoder_outs, _ = self.decoder(
-            encoder_out, pre_acoustic_embeds, pre_token_length
-        )
+        decoder_outs = self.decoder(encoder_out, pre_acoustic_embeds, pre_token_length)
         # decoder_outs: (N, num_tokens, vocab_size)
         return decoder_outs, pre_token_length
 
