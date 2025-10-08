@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+"""
+Code in this file is copied and modified from
+"""
 import math
 from typing import Dict, List, Optional, Tuple
 
@@ -53,55 +56,30 @@ class EncoderLayerSANM(nn.Module):
         # with stochastic depth, residual connection `x + f(x)` becomes
         # `x <- x + 1 / (1 - p) * f(x)` at training time.
         stoch_layer_coeff = 1.0
-        if self.training and self.stochastic_depth_rate > 0:
-            skip_layer = torch.rand(1).item() < self.stochastic_depth_rate
-            stoch_layer_coeff = 1.0 / (1 - self.stochastic_depth_rate)
-
-        if skip_layer:
-            if cache is not None:
-                x = torch.cat([cache, x], dim=1)
-            return x, mask
 
         residual = x
         if self.normalize_before:
             x = self.norm1(x)
 
-        if self.concat_after:
-            x_concat = torch.cat(
-                (
+        if self.in_size == self.size:
+            x = residual + stoch_layer_coeff * self.dropout(
+                self.self_attn(
                     x,
-                    self.self_attn(
-                        x,
-                        mask,
-                        mask_shfit_chunk=mask_shfit_chunk,
-                        mask_att_chunk_encoder=mask_att_chunk_encoder,
-                    ),
-                ),
-                dim=-1,
+                    mask,
+                    mask_shfit_chunk=mask_shfit_chunk,
+                    mask_att_chunk_encoder=mask_att_chunk_encoder,
+                )
             )
-            if self.in_size == self.size:
-                x = residual + stoch_layer_coeff * self.concat_linear(x_concat)
-            else:
-                x = stoch_layer_coeff * self.concat_linear(x_concat)
         else:
-            if self.in_size == self.size:
-                x = residual + stoch_layer_coeff * self.dropout(
-                    self.self_attn(
-                        x,
-                        mask,
-                        mask_shfit_chunk=mask_shfit_chunk,
-                        mask_att_chunk_encoder=mask_att_chunk_encoder,
-                    )
+            x = stoch_layer_coeff * self.dropout(
+                self.self_attn(
+                    x,
+                    mask,
+                    mask_shfit_chunk=mask_shfit_chunk,
+                    mask_att_chunk_encoder=mask_att_chunk_encoder,
                 )
-            else:
-                x = stoch_layer_coeff * self.dropout(
-                    self.self_attn(
-                        x,
-                        mask,
-                        mask_shfit_chunk=mask_shfit_chunk,
-                        mask_att_chunk_encoder=mask_att_chunk_encoder,
-                    )
-                )
+            )
+
         if not self.normalize_before:
             x = self.norm1(x)
 
@@ -113,42 +91,6 @@ class EncoderLayerSANM(nn.Module):
             x = self.norm2(x)
 
         return x, mask, cache, mask_shfit_chunk, mask_att_chunk_encoder
-
-    def forward_chunk(self, x, cache=None, chunk_size=None, look_back=0):
-        """Compute encoded features.
-
-        Args:
-            x_input (torch.Tensor): Input tensor (#batch, time, size).
-            mask (torch.Tensor): Mask tensor for the input (#batch, time).
-            cache (torch.Tensor): Cache tensor of the input (#batch, time - 1, size).
-
-        Returns:
-            torch.Tensor: Output tensor (#batch, time, size).
-            torch.Tensor: Mask tensor (#batch, time).
-
-        """
-
-        residual = x
-        if self.normalize_before:
-            x = self.norm1(x)
-
-        if self.in_size == self.size:
-            attn, cache = self.self_attn.forward_chunk(x, cache, chunk_size, look_back)
-            x = residual + attn
-        else:
-            x, cache = self.self_attn.forward_chunk(x, cache, chunk_size, look_back)
-
-        if not self.normalize_before:
-            x = self.norm1(x)
-
-        residual = x
-        if self.normalize_before:
-            x = self.norm2(x)
-        x = residual + self.feed_forward(x)
-        if not self.normalize_before:
-            x = self.norm2(x)
-
-        return x, cache
 
 
 class MultiSequential(torch.nn.Sequential):
@@ -166,10 +108,8 @@ class MultiSequential(torch.nn.Sequential):
 
     def forward(self, *args):
         """Repeat."""
-        _probs = torch.empty(len(self)).uniform_()
         for idx, m in enumerate(self):
-            if not self.training or (_probs[idx] >= self.layer_drop_rate):
-                args = m(*args)
+            args = m(*args)
         return args
 
 
